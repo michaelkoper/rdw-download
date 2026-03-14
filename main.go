@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -102,7 +103,12 @@ func downloadJSON(ds Dataset, outDir string) error {
 
 	fmt.Printf("[%s] Starting download (paginated, %d rows/page)...\n", ds.Name, pageSize)
 
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := &http.Client{
+		Timeout: 0, // no overall timeout
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 60 * time.Second,
+		},
+	}
 
 	file, err := os.Create(filename)
 	if err != nil {
@@ -110,11 +116,12 @@ func downloadJSON(ds Dataset, outDir string) error {
 	}
 	defer file.Close()
 
+	enc := json.NewEncoder(file)
+
 	file.WriteString("[\n")
 
 	offset := 0
-	firstRecord := true
-	totalBytes := 0
+	totalRows := 0
 
 	for {
 		url := fmt.Sprintf("%s/resource/%s.json?$limit=%d&$offset=%d&$order=:id", baseURL, ds.ID, pageSize, offset)
@@ -124,57 +131,45 @@ func downloadJSON(ds Dataset, outDir string) error {
 			return fmt.Errorf("request failed at offset %d: %w", offset, err)
 		}
 
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
 		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
 			return fmt.Errorf("HTTP %d at offset %d", resp.StatusCode, offset)
 		}
 
+		var records []json.RawMessage
+		err = json.NewDecoder(resp.Body).Decode(&records)
+		resp.Body.Close()
 		if err != nil {
-			return fmt.Errorf("read failed at offset %d: %w", offset, err)
+			return fmt.Errorf("JSON decode failed at offset %d: %w", offset, err)
 		}
 
-		// The response is a JSON array like [{...},{...}]
-		// Strip the outer [ ] and append records
-		content := strings.TrimSpace(string(body))
-		if content == "[]" || content == "" {
+		if len(records) == 0 {
 			break
 		}
 
-		// Remove outer brackets
-		content = strings.TrimPrefix(content, "[")
-		content = strings.TrimSuffix(content, "]")
-		content = strings.TrimSpace(content)
-
-		if content == "" {
-			break
+		for _, rec := range records {
+			if totalRows > 0 {
+				file.WriteString(",\n")
+			}
+			enc.Encode(json.RawMessage(rec))
+			totalRows++
 		}
 
-		if !firstRecord {
-			file.WriteString(",\n")
-		}
-		file.WriteString(content)
-		firstRecord = false
-
-		totalBytes += len(body)
 		offset += pageSize
-		mb := float64(totalBytes) / 1_048_576
-		fmt.Printf("[%s] %.1f MB downloaded (%d rows so far)...\n", ds.Name, mb, offset)
+		info, _ := file.Stat()
+		mb := float64(info.Size()) / 1_048_576
+		fmt.Printf("[%s] %.1f MB written (%d rows so far)...\n", ds.Name, mb, totalRows)
 
-		// If we got fewer than pageSize results, we're done
-		// Count by checking rough number of records (count `{` at start of objects)
-		recordCount := strings.Count(content, "\n{") + 1
-		if recordCount < pageSize {
+		if len(records) < pageSize {
 			break
 		}
 	}
 
-	file.WriteString("\n]\n")
+	file.WriteString("]\n")
 
 	info, _ := file.Stat()
 	mb := float64(info.Size()) / 1_048_576
-	fmt.Printf("[%s] Done! %s (%.1f MB)\n", ds.Name, filename, mb)
+	fmt.Printf("[%s] Done! %s (%.1f MB, %d rows)\n", ds.Name, filename, mb, totalRows)
 	return nil
 }
 

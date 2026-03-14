@@ -58,8 +58,8 @@ Or just run it directly:
 Requires [Go 1.21+](https://go.dev/dl/).
 
 ```bash
-git clone <repo-url>
-cd download_rdw_go
+git clone https://github.com/michaelkoper/rdw-download.git
+cd rdw-download
 go build -o rdw-download .
 ```
 
@@ -105,6 +105,8 @@ rdw-download -only gekentekende_voertuigen_brandstof,gekentekende_voertuigen_ass
 rdw-download -list
 ```
 
-### Note
+### Notes
 
-The main `gekentekende_voertuigen` dataset contains ~16.7 million rows and is several GB in size. Make sure you have enough disk space and a stable internet connection.
+- **JSON** downloads use the SODA API with pagination (50k rows/page), producing a clean JSON array of objects. This is slower but gives you well-structured data.
+- **CSV** downloads use the bulk export endpoint — a single streaming request per dataset, much faster.
+- The main `gekentekende_voertuigen` dataset contains ~16.7 million rows. In JSON format this is ~30 GB, in CSV ~5 GB. Make sure you have enough disk space and a stable internet connection.
