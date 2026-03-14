@@ -1,8 +1,8 @@
 # rdw-download
 
-CLI tool to download [RDW Gekentekende Voertuigen](https://opendata.rdw.nl) (Dutch registered vehicles) datasets.
+CLI tool to download and query [RDW Gekentekende Voertuigen](https://opendata.rdw.nl) (Dutch registered vehicles) datasets.
 
-Downloads all 8 datasets concurrently in JSON or CSV format:
+Downloads all 8 datasets in JSON, CSV, or directly into a SQLite database:
 
 | Dataset | ID |
 |---------|-----|
@@ -24,7 +24,6 @@ Download the binary for your platform from the releases and place it somewhere i
 #### macOS
 
 ```bash
-# Move to a directory in your PATH
 mv rdw-download /usr/local/bin/
 chmod +x /usr/local/bin/rdw-download
 ```
@@ -80,16 +79,19 @@ rdw-download [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-format` | `json` | Output format: `json` or `csv` |
-| `-out` | `.` | Output directory |
-| `-concurrent` | `3` | Max concurrent downloads |
+| `-format` | `json` | Output format: `json`, `csv`, or `sqlite` |
+| `-out` | `.` | Output directory (for json/csv) |
+| `-db` | | SQLite database path (implies `-format sqlite`) |
+| `-concurrent` | `3` | Max concurrent downloads (json/csv only) |
 | `-only` | *(all)* | Comma-separated dataset names to download |
 | `-list` | | List available datasets and exit |
+| `-query` | | Run a SQL query on the database and exit |
+| `-query-format` | `table` | Query output format: `table`, `csv`, or `json` |
 
-### Examples
+### Download examples
 
 ```bash
-# Download all datasets as JSON to the current directory
+# Download all datasets as JSON
 rdw-download
 
 # Download all as CSV into a ./data folder
@@ -105,8 +107,32 @@ rdw-download -only gekentekende_voertuigen_brandstof,gekentekende_voertuigen_ass
 rdw-download -list
 ```
 
+### SQLite examples
+
+```bash
+# Download all datasets into a SQLite database
+rdw-download -db rdw.db
+
+# Download one dataset into SQLite
+rdw-download -db rdw.db -only gekentekende_voertuigen_brandstof
+
+# List tables
+rdw-download -db rdw.db -query "SELECT name FROM sqlite_master WHERE type='table'"
+
+# Top 10 car brands
+rdw-download -db rdw.db -query "SELECT merk, COUNT(*) as cnt FROM gekentekende_voertuigen GROUP BY merk ORDER BY cnt DESC LIMIT 10"
+
+# Find all Teslas (output as JSON)
+rdw-download -db rdw.db -query "SELECT * FROM gekentekende_voertuigen WHERE merk='TESLA' LIMIT 5" -query-format json
+
+# Export query results as CSV
+rdw-download -db rdw.db -query "SELECT kenteken, merk, handelsbenaming FROM gekentekende_voertuigen WHERE merk='TOYOTA'" -query-format csv > toyotas.csv
+```
+
 ### Notes
 
-- **JSON** downloads use the SODA API with pagination (50k rows/page), producing a clean JSON array of objects. This is slower but gives you well-structured data.
+- **JSON** downloads use the SODA API with pagination (50k rows/page), producing a clean JSON array of objects. JSON/CSV downloads run concurrently.
 - **CSV** downloads use the bulk export endpoint — a single streaming request per dataset, much faster.
-- The main `gekentekende_voertuigen` dataset contains ~16.7 million rows. In JSON format this is ~30 GB, in CSV ~5 GB. Make sure you have enough disk space and a stable internet connection.
+- **SQLite** downloads use the SODA API with pagination and insert rows in batches. Each dataset becomes a table. Downloads run sequentially since SQLite only supports one writer at a time.
+- The main `gekentekende_voertuigen` dataset contains ~16.7 million rows. Make sure you have enough disk space and a stable internet connection.
+- No CGO or C compiler required — the SQLite engine is pure Go, so all binaries work out of the box on macOS, Linux, and Windows.
