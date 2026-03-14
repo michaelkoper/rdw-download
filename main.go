@@ -31,6 +31,7 @@ var allDatasets = []Dataset{
 
 const baseURL = "https://opendata.rdw.nl"
 const maxRetries = 3
+const pageSize = 50000
 
 type progressWriter struct {
 	file    *os.File
@@ -44,9 +45,9 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func download(ds Dataset, outDir, format string) error {
-	url := fmt.Sprintf("%s/api/views/%s/rows.%s?accessType=DOWNLOAD", baseURL, ds.ID, format)
-	filename := filepath.Join(outDir, ds.Name+"."+format)
+func downloadCSV(ds Dataset, outDir string) error {
+	url := fmt.Sprintf("%s/api/views/%s/rows.csv?accessType=DOWNLOAD", baseURL, ds.ID)
+	filename := filepath.Join(outDir, ds.Name+".csv")
 
 	fmt.Printf("[%s] Starting download...\n", ds.Name)
 
@@ -94,6 +95,94 @@ func download(ds Dataset, outDir, format string) error {
 	mb := float64(pw.written.Load()) / 1_048_576
 	fmt.Printf("[%s] Done! %s (%.1f MB)\n", ds.Name, filename, mb)
 	return nil
+}
+
+func downloadJSON(ds Dataset, outDir string) error {
+	filename := filepath.Join(outDir, ds.Name+".json")
+
+	fmt.Printf("[%s] Starting download (paginated, %d rows/page)...\n", ds.Name, pageSize)
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("create file: %w", err)
+	}
+	defer file.Close()
+
+	file.WriteString("[\n")
+
+	offset := 0
+	firstRecord := true
+	totalBytes := 0
+
+	for {
+		url := fmt.Sprintf("%s/resource/%s.json?$limit=%d&$offset=%d&$order=:id", baseURL, ds.ID, pageSize, offset)
+
+		resp, err := client.Get(url)
+		if err != nil {
+			return fmt.Errorf("request failed at offset %d: %w", offset, err)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("HTTP %d at offset %d", resp.StatusCode, offset)
+		}
+
+		if err != nil {
+			return fmt.Errorf("read failed at offset %d: %w", offset, err)
+		}
+
+		// The response is a JSON array like [{...},{...}]
+		// Strip the outer [ ] and append records
+		content := strings.TrimSpace(string(body))
+		if content == "[]" || content == "" {
+			break
+		}
+
+		// Remove outer brackets
+		content = strings.TrimPrefix(content, "[")
+		content = strings.TrimSuffix(content, "]")
+		content = strings.TrimSpace(content)
+
+		if content == "" {
+			break
+		}
+
+		if !firstRecord {
+			file.WriteString(",\n")
+		}
+		file.WriteString(content)
+		firstRecord = false
+
+		totalBytes += len(body)
+		offset += pageSize
+		mb := float64(totalBytes) / 1_048_576
+		fmt.Printf("[%s] %.1f MB downloaded (%d rows so far)...\n", ds.Name, mb, offset)
+
+		// If we got fewer than pageSize results, we're done
+		// Count by checking rough number of records (count `{` at start of objects)
+		recordCount := strings.Count(content, "\n{") + 1
+		if recordCount < pageSize {
+			break
+		}
+	}
+
+	file.WriteString("\n]\n")
+
+	info, _ := file.Stat()
+	mb := float64(info.Size()) / 1_048_576
+	fmt.Printf("[%s] Done! %s (%.1f MB)\n", ds.Name, filename, mb)
+	return nil
+}
+
+func download(ds Dataset, outDir, format string) error {
+	if format == "csv" {
+		return downloadCSV(ds, outDir)
+	}
+	return downloadJSON(ds, outDir)
 }
 
 func downloadWithRetry(ds Dataset, outDir, format string) error {
