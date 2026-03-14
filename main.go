@@ -141,7 +141,7 @@ func downloadJSON(ds Dataset, outDir string) error {
 	totalRows := 0
 
 	for {
-		records, err := fetchPage(client, ds.ID, offset)
+		records, err := fetchPageWithRetry(client, ds.ID, offset)
 		if err != nil {
 			return err
 		}
@@ -187,6 +187,9 @@ func downloadSQLite(ds Dataset, dbPath string) error {
 	}
 	defer db.Close()
 
+	// Drop existing table to avoid duplicates on retry
+	db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %q", ds.Name))
+
 	client := newHTTPClient()
 
 	offset := 0
@@ -195,7 +198,7 @@ func downloadSQLite(ds Dataset, dbPath string) error {
 	var columns []string
 
 	for {
-		records, err := fetchPage(client, ds.ID, offset)
+		records, err := fetchPageWithRetry(client, ds.ID, offset)
 		if err != nil {
 			return err
 		}
@@ -234,6 +237,25 @@ func downloadSQLite(ds Dataset, dbPath string) error {
 
 		if len(records) < pageSize {
 			break
+		}
+	}
+
+	// Create indexes
+	fmt.Printf("[%s] Creating indexes...\n", ds.Name)
+	indexColumns := []string{"kenteken"}
+	if ds.Name == "gekentekende_voertuigen" {
+		indexColumns = append(indexColumns, "merk", "voertuigsoort", "datum_eerste_toelating")
+	}
+	for _, col := range indexColumns {
+		for _, c := range columns {
+			if c == col {
+				idxName := fmt.Sprintf("idx_%s_%s", ds.Name, col)
+				q := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %q ON %q (%q)", idxName, ds.Name, col)
+				if _, err := db.Exec(q); err != nil {
+					fmt.Printf("[%s] Warning: could not create index on %s: %v\n", ds.Name, col, err)
+				}
+				break
+			}
 		}
 	}
 
@@ -481,6 +503,20 @@ func queryOutputJSON(rows *sql.Rows, columns []string) error {
 		results = append(results, record)
 	}
 	return enc.Encode(results)
+}
+
+func fetchPageWithRetry(client *http.Client, datasetID string, offset int) ([]json.RawMessage, error) {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		records, err := fetchPage(client, datasetID, offset)
+		if err == nil {
+			return records, nil
+		}
+		fmt.Printf("  Fetch error at offset %d: %v (attempt %d/%d)\n", offset, err, attempt, maxRetries)
+		if attempt < maxRetries {
+			time.Sleep(time.Duration(1<<attempt) * time.Second)
+		}
+	}
+	return nil, fmt.Errorf("failed to fetch page at offset %d after %d attempts", offset, maxRetries)
 }
 
 // --- Download dispatcher ---
